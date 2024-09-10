@@ -1,0 +1,14 @@
+export const factoryABI = [
+    {
+      constant: true,
+      inputs: [
+        { name: 'tokenA', type: 'address' },
+        { name: 'tokenB', type: 'address' },
+      ],
+      name: 'getPair',
+      outputs: [{ name: 'pair', type: 'address' }],
+      payable: false,
+      stateMutability: 'view',
+      type: 'function',
+    },
+  ];
