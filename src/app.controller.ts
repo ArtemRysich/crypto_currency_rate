@@ -1,5 +1,14 @@
 import { Response } from 'express';
-import { Controller, Get, HttpStatus, Query, Res } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpStatus,
+  Post,
+  Query,
+  Req,
+  Res,
+} from '@nestjs/common';
 import { AppService } from './app.service';
 import { ERROR_MESSAGES } from './messages/error.messages';
 import { SUCCES_MESSAGES } from './messages/succes.messages';
@@ -56,5 +65,12 @@ export class AppController {
       });
     }
     return resp.status(HttpStatus.OK).send(historyResult);
+  }
+
+  @Post('kymemail')
+  async getRequest(@Req() req, @Body() body) {
+    // console.log(req);
+    console.log(body.name);
+    console.log(body.phone);
   }
 }

@@ -5,7 +5,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { CacheModule } from '@nestjs/cache-manager';
 import { AppService } from './app.service';
 import type { RedisClientOptions } from 'redis';
-import { ENVIRONMENT } from './common/constants';
+// import { ENVIRONMENT } from './common/constants';
 import { AppController } from './app.controller';
 import { redisStore } from 'cache-manager-redis-store';
 import { WhitelistModule } from './whitelist/whitelist.module';
@@ -19,7 +19,7 @@ import { APP_GUARD } from '@nestjs/core';
 @Module({
   imports: [
     ConfigModule.forRoot({
-      envFilePath: `.env.${ENVIRONMENT}`,
+      envFilePath: `.env`,
       isGlobal: true,
     }),
     CacheModule.register<RedisClientOptions>({
