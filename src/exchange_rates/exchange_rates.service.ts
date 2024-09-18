@@ -1,35 +1,33 @@
-import Web3, { Contract } from 'web3';
 import { Model } from 'mongoose';
+import BigNumber from 'bignumber.js';
 import { Cache } from 'cache-manager';
-import { firstValueFrom } from 'rxjs';
 import { InjectModel } from '@nestjs/mongoose';
-import { ConfigService } from '@nestjs/config';
-import { Inject, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { pairAbi } from './utils/pairAbi';
-import { CurrencyPair } from './schemas/currency-pairs.schema';
-import { WhitelistService } from './whitelist/whitelist.service';
-import { IcurrencyPair } from './interfaces/currencypair.interface';
-import { CreateContractDto } from './whitelist/dto/createContract.dto';
-import { Reserves } from './interfaces/reserves.interface';
-import { ETHER, MAXIMUM_PERCENTAGE_DIFFERENCE } from './common/constants';
-import { IsmartContract } from './interfaces/smartContract.interface';
+import { BlockchainService } from './blockchain.service';
 import { IrateResponse } from './interfaces/rate.interface';
+import { CurrencyPair } from './schemas/currency-pairs.schema';
+import { WhitelistService } from '../whitelist/whitelist.service';
+import { ERROR_MESSAGES } from 'src/utils/messages/error.messages';
+import { IcurrencyPair } from './interfaces/currencypair.interface';
+import { IsmartContract } from './interfaces/smartContract.interface';
+import { CreateContractDto } from '../whitelist/dto/createContract.dto';
+import { MAXIMUM_PERCENTAGE_DIFFERENCE } from '../utils/common/constants';
 
 @Injectable()
-export class AppService {
-  private readonly web3: Web3;
+export class ExchangeRatesService {
   constructor(
     @InjectModel(CurrencyPair.name)
     private readonly currencyPiarModel: Model<CurrencyPair>,
     private readonly whiteListService: WhitelistService,
-    private readonly configService: ConfigService,
+    private readonly blockchainService: BlockchainService,
     @Inject('CACHE_MANAGER') private cacheManager: Cache,
-  ) {
-    this.web3 = new Web3(
-      new Web3.providers.HttpProvider('https://bsc-dataseed.binance.org/'),
-    );
-  }
+  ) {}
 
   @Cron(CronExpression.EVERY_MINUTE)
   async compareExchangeRates(): Promise<void> {
@@ -49,7 +47,7 @@ export class AppService {
           isInvalidPair = true;
         }
 
-        const rate = await this.createRate(
+        const currencyRate = await this.createRate(
           symbolA,
           symbolB,
           binancePair,
@@ -57,8 +55,15 @@ export class AppService {
           isInvalidPair,
         );
 
-        if (rate) {
-          await this.cacheManager.set(binancePair, rate, 6000);
+        if (currencyRate) {
+          const { timeStamp, isCorrect, rate } = currencyRate;
+          const rateForCache = {
+            timeStamp,
+            isCorrect,
+            rate,
+          };
+
+          await this.cacheManager.set(binancePair, rateForCache, 6000);
         }
       },
     );
@@ -68,7 +73,7 @@ export class AppService {
     symbolA: string,
     symbolB: string,
   ): Promise<IrateResponse | undefined> {
-    const pair = `${symbolA}${symbolB}`.toUpperCase();
+    const pair = `${symbolA}${symbolB}`;
     const cache: IcurrencyPair = await this.cacheManager.get(pair);
 
     if (!cache) {
@@ -86,11 +91,13 @@ export class AppService {
         smartContract = await this.whiteListService.create(dto);
 
         if (!smartContract) {
-          return;
+          throw new BadRequestException(
+            ERROR_MESSAGES.pairUnavailable(symbolA, symbolB),
+          );
         }
       }
 
-      const rate = await this.createRate(
+      const currencyRate = await this.createRate(
         symbolA,
         symbolB,
         smartContract.binancePair,
@@ -98,16 +105,27 @@ export class AppService {
         false,
       );
 
-      if (!rate) {
-        return;
+      if (!currencyRate) {
+        throw new BadRequestException(
+          ERROR_MESSAGES.pairUnavailable(symbolA, symbolB),
+        );
       }
 
-      await this.cacheManager.set(pair, rate, 6000);
+      const { timeStamp, isCorrect, rate } = currencyRate;
+      const rateForCache = {
+        timeStamp,
+        isCorrect,
+        rate,
+      };
+
+      await this.cacheManager.set(pair, rateForCache, 6000);
       return this.getRate(symbolA, symbolB);
     }
 
     if (!cache.isCorrect) {
-      return;
+      throw new BadRequestException(
+        ERROR_MESSAGES.pairUnavailable(symbolA, symbolB),
+      );
     }
 
     return {
@@ -116,15 +134,18 @@ export class AppService {
     };
   }
 
-
   async getHistory(
     symbolA: string,
     symbolB: string,
     fromTimestamp: number,
     toTimestamp: number,
   ): Promise<IrateResponse[]> {
-    const pair: string = `${symbolA}${symbolB}`.toUpperCase();
-    const history = await this.currencyPiarModel
+    if (fromTimestamp > toTimestamp) {
+      throw new BadRequestException(ERROR_MESSAGES.emtyDataForTimeStamp());
+    }
+
+    const pair: string = `${symbolA}${symbolB}`;
+    const historyResp = await this.currencyPiarModel
       .find({
         binancePair: pair,
         timeStamp: {
@@ -135,10 +156,16 @@ export class AppService {
       })
       .exec();
 
-    return history.map(({ timeStamp, rate }) => ({
+    const history = historyResp.map(({ timeStamp, rate }) => ({
       timestamp: timeStamp,
       rate,
     }));
+
+    if (!history.length) {
+      throw new NotFoundException(ERROR_MESSAGES.noRecords());
+    }
+
+    return history;
   }
 
   private async createRate(
@@ -147,23 +174,28 @@ export class AppService {
     binancePair: string,
     pancakePair: string,
     isInvalidRates: boolean = false,
-  ): Promise<IcurrencyPair | undefined> {
-    const binancePairData = await firstValueFrom(
-      this.whiteListService.getBinancePair(binancePair),
-    );
+  ): Promise<IcurrencyPair> {
+    const binancePairData =
+      await this.whiteListService.getBinancePair(binancePair);
 
-    if (!binancePairData && !binancePairData.rate) {
-      return;
+    if (!binancePairData) {
+      throw new BadRequestException(
+        ERROR_MESSAGES.pairUnavailable(symbolA, symbolB),
+      );
     }
 
-    const pancakePairRate: string = await this.getPancakePairRate(pancakePair);
+    const pancakePairRate: string =
+      await this.blockchainService.getPancakePairRate(pancakePair);
 
     if (!pancakePairRate) {
-      return;
+      throw new BadRequestException(
+        ERROR_MESSAGES.pairUnavailable(symbolA, symbolB),
+      );
     }
 
+    const binancePrice = binancePairData[binancePair];
     const percentDiscrepancy: number = this.getPercentDiscrepancy(
-      binancePairData.price,
+      binancePrice,
       pancakePairRate,
     );
 
@@ -173,7 +205,7 @@ export class AppService {
       binancePair: binancePair,
       pairAddressUni: pancakePair,
       timeStamp: Date.now(),
-      rate: binancePairData.price,
+      rate: binancePrice,
       isCorrect:
         !isInvalidRates && percentDiscrepancy < MAXIMUM_PERCENTAGE_DIFFERENCE
           ? true
@@ -185,33 +217,18 @@ export class AppService {
     return createdPair.save();
   }
 
-  private async getPancakePairRate(pancakePair: string): Promise<string> {
-    const pairContract = new this.web3.eth.Contract(pairAbi, pancakePair);
-    const reserves: Reserves = await pairContract.methods.getReserves().call();
-    const reserveA: string = this.web3.utils.fromWei(
-      reserves._reserve0.toString(),
-      ETHER,
-    );
-    const reserveB: string = this.web3.utils.fromWei(
-      reserves._reserve1.toString(),
-      ETHER,
-    );
-
-    const price: number = Number(reserveB) / Number(reserveA);
-
-    const formattedPrice: string = price.toFixed(8);
-
-    return formattedPrice;
-  }
-
   private getPercentDiscrepancy(
     binancePair: string,
     pancakePairRate: string,
   ): number {
-    const binancePrice: number = Number(binancePair);
-    const pancakePrice: number = Number(pancakePairRate);
-    const percentDiscrepancy: number =
-      (Math.abs(binancePrice - pancakePrice) / binancePrice) * 100;
+    const binancePrice = new BigNumber(binancePair);
+    const pancakePrice = new BigNumber(pancakePairRate);
+    const percentDiscrepancy = binancePrice
+      .minus(pancakePrice)
+      .abs()
+      .dividedBy(binancePrice)
+      .multipliedBy(100)
+      .toNumber();
 
     return percentDiscrepancy;
   }

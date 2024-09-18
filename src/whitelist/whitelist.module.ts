@@ -4,6 +4,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { WhitelistService } from './whitelist.service';
 import { WhitelistController } from './whitelist.controller';
 import { Contract, ContractSchema } from './schemas/smartcontract.schema';
+import { BlockchainService } from 'src/exchange_rates/blockchain.service';
 
 @Module({
   imports: [
@@ -12,7 +13,7 @@ import { Contract, ContractSchema } from './schemas/smartcontract.schema';
       { name: Contract.name, schema: ContractSchema },
     ]),
   ],
-  providers: [WhitelistService],
+  providers: [WhitelistService, BlockchainService],
   controllers: [WhitelistController],
   exports: [WhitelistService],
 })

@@ -1,50 +1,60 @@
-import Web3 from 'web3';
 import { Model } from 'mongoose';
-import { AxiosError } from 'axios';
-import { HttpService } from '@nestjs/axios';
-import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
-import { catchError, firstValueFrom, map, of } from 'rxjs';
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
-import { tokens } from '../utils/tokens';
-import { factoryABI } from '../utils/factoriAbi';
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import Binance, { Binance as IBinance } from 'binance-api-node';
 import { Contract } from './schemas/smartcontract.schema';
+import { INVALID_ADDRESS } from '../utils/common/constants';
 import { CreateContractDto } from './dto/createContract.dto';
-import { IErrRespData } from './interfaces/errorResponse.interface';
-import { BINANCY_INVALID_PAIR, INVALID_ADDRESS } from 'src/common/constants';
+import { ERROR_MESSAGES } from 'src/utils/messages/error.messages';
+import { BlockchainService } from 'src/exchange_rates/blockchain.service';
 
 @Injectable()
 export class WhitelistService {
-  private readonly web3: Web3;
+  private readonly binanceClient: IBinance;
   constructor(
     @InjectModel(Contract.name)
     private readonly contractModel: Model<Contract>,
-    private readonly httpService: HttpService,
-    private readonly configService: ConfigService,
+    private readonly blockchainService: BlockchainService,
   ) {
-    this.web3 = new Web3('https://bsc-dataseed.binance.org/');
+    this.binanceClient = Binance();
   }
 
-  async create(
-    createContractDto: CreateContractDto,
-  ): Promise<Contract | undefined> {
-    const pair =
-      `${createContractDto.symbolA}${createContractDto.symbolB}`.toUpperCase();
+  async create(createContractDto: CreateContractDto): Promise<Contract> {
+    const { symbolA, symbolB } = createContractDto;
+    const pair = `${symbolA}${symbolB}`;
+
+    const isUnicPair = await this.isUnicPair(pair);
+
+    if (!isUnicPair) {
+      throw new BadRequestException(
+        ERROR_MESSAGES.listAlreadeCreated(symbolA, symbolB),
+      );
+    }
 
     try {
-      const binancePair = await firstValueFrom(this.getBinancePair(pair));
+      const binancePair = await this.getBinancePair(pair);
 
-      if (binancePair.isInvalidPair) {
-        return;
+      if (!binancePair) {
+        throw new BadRequestException(
+          ERROR_MESSAGES.pairUnavailable(symbolA, symbolB),
+        );
       }
 
-      const pairAddressUni = await this.getPairAddressUni(
-        createContractDto.symbolA,
-        createContractDto.symbolB,
+      const pairAddressUni = await this.blockchainService.getPairAddressUni(
+        symbolA,
+        symbolB,
       );
 
       if (pairAddressUni === INVALID_ADDRESS) {
-        return;
+        throw new BadRequestException(
+          ERROR_MESSAGES.pairUnavailable(symbolA, symbolB),
+        );
       }
 
       const contract = {
@@ -65,49 +75,20 @@ export class WhitelistService {
     return await this.contractModel.find().exec();
   }
 
-  async removeContractPair(pair: string): Promise<Contract | null> {
-    return await this.contractModel
-      .findOneAndDelete({ binancePair: pair.toUpperCase() })
+  async removeContractPair(pair: string): Promise<Contract> {
+    const removedPair = await this.contractModel
+      .findOneAndDelete({ binancePair: pair })
       .exec();
+
+    if (!removedPair) {
+      throw new NotFoundException(ERROR_MESSAGES.pairNotFound(pair));
+    }
+
+    return removedPair;
   }
 
-  getBinancePair(pair: string) {
-    return this.httpService
-      .get(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`)
-      .pipe(
-        map((response) => {
-          return response.data;
-        }),
-        catchError((err: AxiosError) => {
-          if (err.response) {
-            const errorData: IErrRespData = err.response.data as IErrRespData;
-
-            if (errorData.code === BINANCY_INVALID_PAIR) {
-              return of({
-                isInvalidPair: true,
-              });
-            }
-          }
-        }),
-      );
-  }
-
-  private async getPairAddressUni(
-    symbolA: string,
-    symbolB: string,
-  ): Promise<string> {
-    const tokenA = this.getTokenAddres(symbolA);
-    const tokenB = this.getTokenAddres(symbolB);
-
-    const factoryContract = new this.web3.eth.Contract(
-      factoryABI,
-      this.configService.get<string>('FACTORY_ADDRESS'),
-    );
-    const pairAddress: string = await factoryContract.methods
-      .getPair(tokenA, tokenB)
-      .call();
-
-    return pairAddress;
+  async getBinancePair(symbol: string) {
+    return await this.binanceClient.prices({ symbol });
   }
 
   async isUnicPair(pair: string): Promise<boolean> {
@@ -116,9 +97,5 @@ export class WhitelistService {
       .exec();
 
     return result ? false : true;
-  }
-
-  private getTokenAddres(symbol: string): string {
-    return tokens[symbol.toUpperCase()];
   }
 }
